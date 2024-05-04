@@ -1,17 +1,8 @@
-/*{
-  "type": "action",
-  "targets": ["omnifocus"],
-  "author": "Bastian Kuhn",
-  "identifier": "de.bastian-kuhn.omnifocus.sync.jira",
-  "version": "1.3",
-  "description": "Sync elements from Jira with Omnifocus",
-  "label": "🔹 Jira: Sync",
-  "shortLabel": "Jira: sync"
-}*/
 (() => {
   const action = new PlugIn.Action(function (selection, sender) {
     // START EDIT
-    const configs = [{
+    const configs = [
+      {
         user: "", // use email address for jira cloud
         password: "", // you can use api tokens, see https://id.atlassian.com/manage-profile/security/api-tokens
         jiraUrl: "",
@@ -19,204 +10,150 @@
         jiraQuery: "assignee=currentuser() and resolution is empty",
         processComments: false, // if true, a subtask is added for each ticket comment
         omnifocusCommentTagToUse: "Jira-Comment",
-//    },
-//    {
-//        user: "",
-//        password: "",
-//        jiraUrl: "",
-//        omnifocusTagToUse: "",
-//        jiraQuery: "assignee=currentuser() and resolution is empty",
-//        processComments: false,
-//        omnifocusCommentTagToUse: "",
-//
-    }]
+      },
+    ];
     // END EDIT
 
     configs.forEach((config) => {
-        const user = config.user;
-        const password = config.password;
-        const jiraUrl = config.jiraUrl;
-        const omnifocusTagToUse = config.omnifocusTagToUse;
-        const jiraQuery = config.jiraQuery;
-        const processComments = config.processComments;
-        const omnifocusCommentTagToUse = config.omnifocusCommentTagToUse;
+      const { user, password, jiraUrl, omnifocusTagToUse, jiraQuery, processComments, omnifocusCommentTagToUse } = config;
 
-        const urlParams = "/rest/api/2/search?jql=" + encodeURIComponent(jiraQuery);
-        const url = jiraUrl + urlParams;
+      const urlParams = "/rest/api/2/search?jql=" + encodeURIComponent(jiraQuery);
+      const url = jiraUrl + urlParams;
 
+      const credentials = btoa(`${user}:${password}`);
 
-        const data = Data.fromString(user + ":" + password);
-        const credentials = data.toBase64();
+      const request = new PlugIn.Request(url);
+      request.method = "GET";
+      request.headers = { Authorization: `Basic ${credentials}` };
 
-        const request = URL.FetchRequest.fromString(url);
-        request.method = "GET";
-        request.headers = { Authorization: `Basic ${credentials}` };
-        const requestPromise = request.fetch();
-
-
-        // Find the tag
-        let tag = null;
-
-        // If user gave an absolute path, parse it and process it
-        const parsedOmnifocusTagToUse = omnifocusTagToUse.split(" : ");
-        if (parsedOmnifocusTagToUse.length > 1) {
-          let currentTag = null;
-          let i;
-          for (i = 0; i < parsedOmnifocusTagToUse.length; i++) {
-            let newTag;
-            if (currentTag) {
-              newTag = currentTag.childNamed(parsedOmnifocusTagToUse[i]);
-            } else {
-              newTag = tags.byName(parsedOmnifocusTagToUse[i]);
-            }
-            if (!newTag) break;
-            currentTag = newTag;
-          }
-
-          // after all ran, check if its a success, then apply tag
-          if (
-            currentTag &&
-            i === parsedOmnifocusTagToUse.length &&
-            currentTag.name ===
-              parsedOmnifocusTagToUse[parsedOmnifocusTagToUse.length - 1]
-          ) {
-            tag = currentTag;
-          }
-        }
+      // Find the tag
+      const findOrCreateTag = (tagName) => {
+        let tag = tagNamed(tagName);
         if (!tag) {
-          // if tag is not found yet
-          tag =
-            tags.byName(omnifocusTagToUse) ||
-            flattenedTags.byName(omnifocusTagToUse) ||
-            new Tag(omnifocusTagToUse);
+          tag = new Tag(tagName);
+          tag.active = true;
         }
-        if (!tag) {
-          console.error(new Error("could not create tag"));
-          return;
-        }
-        const tasks = tag.tasks;
+        return tag;
+      };
 
-        const omnifocusComments = {};
-        if (processComments) {
-          // Get all comment tagged tasks
-          var commentTag =
-            tags.byName(omnifocusCommentTagToUse) ||
-            flattenedTags.byName(omnifocusCommentTagToUse) ||
-            new Tag(omnifocusCommentTagToUse);
+      const processTag = (tagPath) => {
+        const parsedTags = tagPath.split(" : ");
+        let currentTag = null;
 
-            const commentTasks = commentTag.tasks;
-            commentTasks.forEach((comment) => {
-              const re = new RegExp(`^[A-Za-z0-9-]+ [0-9]+`);
-              let commentId;
-              try {
-                commentId = comment.name.match(re);
-                if (!commentId) return;
-              } catch {
-                return;
-              }
-              omnifocusComments[commentId] = comment;
-            });
+        for (const tagName of parsedTags) {
+          currentTag = currentTag
+            ? currentTag.childNamed(tagName)
+            : findOrCreateTag(tagName);
+          if (!currentTag) break;
         }
 
-        // cache object instead of array so search will be faster later
-        let omnifocusTasks = {};
-        tasks.forEach((task) => {
-          const re = new RegExp(`^[A-Za-z0-9-]+`);
-          let taskId;
-          try {
-            taskId = task.name.match(re)[0];
-            if (!taskId) return;
-          } catch {
-            return;
-          }
-          omnifocusTasks[taskId] = task;
-          // Reset Jira Match Flag
-          omnifocusTasks[taskId].jiraToOmnifocusMatched = false;
+        return currentTag;
+      };
+
+      const tag = processTag(omnifocusTagToUse);
+      if (!tag) {
+        console.error(new Error("Could not create tag"));
+        return;
+      }
+
+      const tasks = tag.taggedTasks;
+
+      const omnifocusComments = {};
+      if (processComments) {
+        const commentTag = findOrCreateTag(omnifocusCommentTagToUse);
+        const commentTasks = commentTag.taggedTasks;
+        commentTasks.forEach((comment) => {
+          const commentId = comment.name.match(/^[A-Za-z0-9-]+ [0-9]+/);
+          if (commentId) omnifocusComments[commentId[0]] = comment;
         });
+      }
 
-        requestPromise.then((response) => {
-          let createdTasks = 0;
-          let checkedTickets = 0;
-          let createdComments = 0;
-          if (response.mimeType == "application/json") {
-            const jsonResponse = JSON.parse(response.bodyString);
-            // ADD THE TASKS
+      const omnifocusTasks = {};
+      tasks.forEach((task) => {
+        const taskId = task.name.match(/^[A-Za-z0-9-]+/);
+        if (taskId) {
+          omnifocusTasks[taskId[0]] = task;
+          task.jiraToOmnifocusMatched = false;
+        }
+      });
 
-            for (const issue of jsonResponse.issues) {
-              // Search if we need to add a new Task
-              checkedTickets++;
-              if (omnifocusTasks[issue.key]) {
-                // Make sure the task opens again
-                omnifocusTasks[issue.key].markIncomplete();
-                omnifocusTasks[issue.key].jiraToOmnifocusMatched = true;
-                continue;
-              }
+      request.onSuccess = (response) => {
+        let createdTasks = 0;
+        let checkedTickets = 0;
+        let createdComments = 0;
 
-              // There was no Matching Task, so we create the Task
-              const taskName = issue.key + " " + issue.fields.summary;
-              const newTask = new Task(taskName, inbox.beginning);
-              const taskUrl = jiraUrl + "/browse/" + issue.key;
+        if (response.mimeType === "application/json") {
+          const jsonResponse = JSON.parse(response.responseText);
+
+          for (const issue of jsonResponse.issues) {
+            checkedTickets++;
+            const taskId = issue.key;
+            const existingTask = omnifocusTasks[taskId];
+
+            if (existingTask) {
+              existingTask.completed = false;
+              existingTask.jiraToOmnifocusMatched = true;
+            } else {
+              const taskName = `${taskId} ${issue.fields.summary}`;
+              const newTask = new Task(taskName);
+              newTask.id = taskId;
+              const taskUrl = `${jiraUrl}/browse/${taskId}`;
               createdTasks++;
 
               newTask.addTag(tag);
-              newTask.note =
-                taskUrl + "\n" + (issue.fields.description || "No description");
+              newTask.note = `${taskUrl}\n${issue.fields.description || "No description"}`;
+            }
+          }
+
+          for (const [taskId, task] of Object.entries(omnifocusTasks)) {
+            if (!task.jiraToOmnifocusMatched) {
+              const canDelete = !task.children.some((subtask) => !subtask.completed);
+              if (canDelete) task.completed = true;
             }
 
+            if (processComments) {
+              const commentUrlParams = `/rest/api/2/issue/${taskId}/comment`;
+              const commentUrl = jiraUrl + commentUrlParams;
+              const commentRequest = new PlugIn.Request(commentUrl);
+              commentRequest.method = "GET";
+              commentRequest.headers = { Authorization: `Basic ${credentials}` };
 
-            //Close Tasks or Update comments if enabled
-            for (const [task_id, task] of Object.entries(omnifocusTasks)) {
-              if (!task.jiraToOmnifocusMatched) {
-                  var can_delete = true;
-
-                  if(task.hasChildren){
-                      task.children.forEach(subtask => {
-                          if (!subtask.completed){
-                            can_delete = false;
-                          }
-                      });
-                  }
-                  if(can_delete) {
-                    task.markComplete();
+              commentRequest.onSuccess = (commentResponse) => {
+                const jsonComments = JSON.parse(commentResponse.responseText);
+                for (const comment of jsonComments.comments) {
+                  const commentId = `${taskId} ${comment.id}`;
+                  if (!omnifocusComments[commentId]) {
+                    const taskName = `${commentId} Comment:\n${comment.body}`;
+                    const newTask = new Task(taskName);
+                    newTask.id = commentId;
+                    newTask.parent = task;
+                    newTask.addTag(commentTag);
+                    createdComments++;
                   }
                 }
-                // Better check anyway, may the ticket is just reasigned
-                if (processComments) {
-                    const commentUrlParams = "/rest/api/2/issue/"+task_id +"/comment"
-                    const commentUrl = jiraUrl + commentUrlParams;
-                    const commentRequest = URL.FetchRequest.fromString(commentUrl);
-                    commentRequest.method = "GET";
-                    commentRequest.headers = { Authorization: `Basic ${credentials}` };
-                    var requestPromiseComment = commentRequest.fetch();
-                    requestPromiseComment.then((commentResponse) => {
-                        const jsonComments = JSON.parse(commentResponse.bodyString);
-                        for (const comment of jsonComments.comments) {
-                            const comment_id = task_id + " " + comment.id;
-                            if (!omnifocusComments[comment_id] ) {
-                                const taskName = comment_id + " Comment:\n" + comment.body;
-                                const newTask = new Task(taskName, task);
-                                newTask.addTag(commentTag);
-                                createdComments++;
-                            }
-                        }
-                    });
-                }
-            };
+              };
+
+              commentRequest.onFailure = (response) => {
+                console.error(`Error fetching comments for task ${taskId}: ${response.statusText}`);
+              };
+
+              commentRequest.send();
+            }
           }
-          console.log(`NOTICE: Synced ${jiraUrl}. Checked ${checkedTickets} Tickets, Created ${createdTasks} new tasks, Added ${createdComments} Subtickets for Comments`);
-        });
+        }
 
-        requestPromise.catch((err) => {
-          console.log(`DEBUG: catch error ${err}`);
-        });
+        console.log(`NOTICE: Synced ${jiraUrl}. Checked ${checkedTickets} Tickets, Created ${createdTasks} new tasks, Added ${createdComments} Subtickets for Comments`);
+      };
+
+      request.onFailure = (response) => {
+        console.error(`Error fetching Jira tickets: ${response.statusText}`);
+      };
+
+      request.send();
     });
-
   });
 
   action.validate = function (selection, sender) {
-    //
-    // This action is always valid.
-    //
     return true;
   };
 
